@@ -2,7 +2,7 @@
 import { appendFile, readFile } from "node:fs/promises"
 import { join } from "node:path"
 import { parseArgs } from "node:util"
-import { AcpClient, isRecord, type PermissionPolicy, type RemoteTarget } from "./acp"
+import { AcpClient, CLIENT_INFO, isRecord, type PermissionPolicy, type RemoteTarget } from "./acp"
 import { renderBatch, runBatch, type BatchRow } from "./batch"
 import { chat, type ChatTarget } from "./chat"
 import { readConfig, writeConfig, type Account, type WorkspaceChoice } from "./config"
@@ -49,6 +49,7 @@ Commands:
   sessions [--all]                         List the sessions of the workspace
   status <session> | --batch <id>          Show the state of a session, or of every session of a batch
   archive <session>                        End a session and keep its history
+  sweep [--all] [--force]                  Archive every live session launched by this tool (cleanup after a kill)
 `
 
 /** A batch larger than this needs --allow-large: it is load on production, so it needs the approval of the service owners. */
@@ -156,6 +157,8 @@ async function main(): Promise<number> {
       return values.batch === undefined ? status(requireArgument(rest[0], "status <session>")) : batchStatus(values.batch)
     case "archive":
       return archive(requireArgument(rest[0], "archive <session>"))
+    case "sweep":
+      return sweep(values.all !== true, values.force === true)
     default:
       console.log(USAGE)
       return command === undefined || values.help === true ? 0 : 2
@@ -611,6 +614,107 @@ async function archive(sessionId: string): Promise<number> {
   const outcome = await new SpawnerHttp(spawnerHttpUrl(env), async () => token).archiveSession(sessionId)
   console.log(`archive     HTTP ${outcome.status} in ${outcome.ms} ms${outcome.body === "" ? "" : `: ${outcome.body.slice(0, 200)}`}`)
   return outcome.status >= 200 && outcome.status < 300 ? 0 : 1
+}
+
+/** The spawner statuses of a session that is still alive and still bills. */
+const LIVE_STATUSES: ReadonlySet<string> = new Set([
+  "LAUNCHING", "CLONING_REPOSITORY", "STARTING_CONTAINER", "RUNNING", "FINISHED", "USER_INPUT_REQUIRED", "SUSPENDED",
+])
+
+/**
+ * Archives every live session, so a killed batch leaves nothing running. By default it only touches the
+ * sessions this tool launched (`launchedFrom = "jcp-tank"`), so a real session from Air is safe. `--all`
+ * archives every live session and needs `--force`, because it can hit another client's work.
+ */
+async function sweep(oursOnly: boolean, force: boolean): Promise<number> {
+  if (!oursOnly && !force) {
+    console.error("sweep --all archives every live session in the workspace, including other clients. Add --force to confirm.")
+    return 2
+  }
+  const token = await spawnerToken()
+  const http = new SpawnerHttp(spawnerHttpUrl(env), async () => token)
+  const client = await AcpClient.connect(spawnerAcpUrl(env), token, {})
+  const live: string[] = []
+  try {
+    await client.initialize()
+    let cursor: string | undefined
+    let listed = 0
+    for (let page = 0; page < 200; page++) {
+      const result = await client.listSessions(cursor)
+      const rows = Array.isArray(result.sessions) ? result.sessions.filter(isRecord) : []
+      listed += rows.length
+      for (const row of rows) {
+        const status = isRecord(row._meta) && typeof row._meta.status === "string" ? row._meta.status.toUpperCase() : ""
+        if (LIVE_STATUSES.has(status) && typeof row.sessionId === "string") {
+          live.push(row.sessionId)
+        }
+      }
+      cursor = typeof result.nextCursor === "string" ? result.nextCursor : undefined
+      if (cursor === undefined) {
+        break
+      }
+    }
+    console.log(`listed ${listed} sessions, ${live.length} live`)
+  }
+  finally {
+    client.close()
+  }
+
+  // Keep only the sessions this tool launched, unless --all. The list row has no launchedFrom, so read it per session.
+  let targets = live
+  if (oursOnly && live.length > 0) {
+    const kept: string[] = []
+    await mapLimit(live, 20, async (id) => {
+      const outcome = await http.session(id)
+      const owner = outcome.status === 200 ? parseLaunchedFrom(outcome.body) : undefined
+      if (owner === CLIENT_INFO.name) {
+        kept.push(id)
+      }
+    })
+    console.log(`${kept.length} of ${live.length} live sessions were launched by ${CLIENT_INFO.name}${live.length > kept.length ? `; ${live.length - kept.length} left untouched (use --all --force to include them)` : ""}`)
+    targets = kept
+  }
+  if (targets.length === 0) {
+    console.log("nothing to archive")
+    return 0
+  }
+
+  let ok = 0
+  let fail = 0
+  await mapLimit(targets, 20, async (id) => {
+    const outcome = await http.archiveSession(id).catch(() => ({ status: 0 }))
+    if (outcome.status >= 200 && outcome.status < 300) {
+      ok++
+    }
+    else {
+      fail++
+    }
+    process.stdout.write(`\rarchived ${ok}, failed ${fail}, of ${targets.length}`)
+  })
+  console.log(`\ndone: archived ${ok}, failed ${fail}`)
+  return fail === 0 ? 0 : 1
+}
+
+function parseLaunchedFrom(body: string): string | undefined {
+  try {
+    const json: unknown = JSON.parse(body)
+    return isRecord(json) && typeof json.launchedFrom === "string" ? json.launchedFrom : undefined
+  }
+  catch {
+    return undefined
+  }
+}
+
+/** Runs the task over the items, at most `limit` at a time. */
+async function mapLimit<T>(items: readonly T[], limit: number, task: (item: T) => Promise<void>): Promise<void> {
+  let next = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const item = items[next++]!
+      await task(item)
+    }
+  })
+  await Promise.all(workers)
 }
 
 function requireArgument(value: string | undefined, usage: string): string {

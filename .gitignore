@@ -3,3 +3,5 @@ runs/
 .env*
 reports/
 .idea/
+
+*.zip
