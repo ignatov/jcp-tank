@@ -1,0 +1,37 @@
+<config>
+  <url enabled="true" type="auth" value="https://account.jetbrains.com/lservice/service-auth"/>
+  <url enabled="true" type="license" value="https://account.jetbrains.com/lservice"/>
+  <url enabled="true" type="reset_password" value="https://account.jetbrains.com/forgot-password"/>
+  <url enabled="true" type="oauth2" value="https://oauth.account.jetbrains.com"/>
+  <url enabled="false" type="fls_version_file" value="https://download.jetbrains.com/lcsrv/build.txt"/>
+  <url enabled="true" type="account_info" value="https://account.jetbrains.com/lservice/account/info"/>
+  <url enabled="true" type="signup" value="https://account.jetbrains.com/signup"/>
+  <url enabled="true" type="manage_account" value="https://account.jetbrains.com/"/>
+  <url enabled="true" type="account_payment_methods" value="https://account.jetbrains.com/licenses/tokens"/>
+  <url enabled="true" type="jcp" value="https://api.jetbrains.cloud"/>
+  <oauth>
+    <clientId>ide</clientId>
+    <scope>openid offline_access r_ide_auth</scope>
+    <authEndpoint>https://account.jetbrains.com/oauth/login</authEndpoint>
+    <tokenEndpoint>https://oauth.account.jetbrains.com/oauth2/token</tokenEndpoint>
+    <orgsUserInfoJwtEndpoint>https://api.jetbrains.cloud/org/orgsuserinfo/extended</orgsUserInfoJwtEndpoint>
+    <providers>
+      <provider name="Google"
+                logo="https://resources.jetbrains.com/storage/products/bad/oauth2/ide/google.svg"
+                logoDark="https://resources.jetbrains.com/storage/products/bad/oauth2/ide/google.svg"
+                viaProvider="Google"/>
+      <provider name="GitHub"
+                logo="https://resources.jetbrains.com/storage/products/bad/oauth2/ide/github.svg"
+                logoDark="https://resources.jetbrains.com/storage/products/bad/oauth2/ide/github_dark.svg"
+                viaProvider="GitHub"/>
+      <provider name="GitLab"
+                logo="https://resources.jetbrains.com/storage/products/bad/oauth2/ide/gitlab.svg"
+                logoDark="https://resources.jetbrains.com/storage/products/bad/oauth2/ide/gitlab.svg"
+                viaProvider="GitLab"/>
+      <provider name="Bitbucket"
+                logo="https://resources.jetbrains.com/storage/products/bad/oauth2/ide/bitbucket.svg"
+                logoDark="https://resources.jetbrains.com/storage/products/bad/oauth2/ide/bitbucket.svg"
+                viaProvider="Bitbucket"/>
+    </providers>
+  </oauth>
+</config>
