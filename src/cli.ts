@@ -50,6 +50,7 @@ Commands:
   status <session> | --batch <id>          Show the state of a session, or of every session of a batch
   archive <session>                        End a session and keep its history
   sweep [--all] [--force]                  Archive every live session launched by this tool (cleanup after a kill)
+  monitor [--interval <s>] [--hours <h>]   Reliability probe: one real session per interval, billed
 `
 
 /** A batch larger than this needs --allow-large: it is load on production, so it needs the approval of the service owners. */
@@ -90,6 +91,8 @@ async function main(): Promise<number> {
       permissions: { type: "string" },
       batch: { type: "string" },
       "allow-large": { type: "boolean" },
+      interval: { type: "string", default: "300" },
+      hours: { type: "string", default: "12" },
       help: { type: "boolean", short: "h" },
     },
   })
@@ -159,6 +162,27 @@ async function main(): Promise<number> {
       return archive(requireArgument(rest[0], "archive <session>"))
     case "sweep":
       return sweep(values.all !== true, values.force === true)
+    case "monitor": {
+      const warm = values.warm ?? "git"
+      const warmTurn = WARM_TURNS[warm]
+      if (warmTurn === undefined) {
+        throw new Error(`--warm is ${Object.keys(WARM_TURNS).join(", ")}, not "${warm}"`)
+      }
+      const plan: RunPlan = {
+        remote: { url: values.repo ?? DEFAULT_REMOTE.url, branch: values.branch ?? DEFAULT_REMOTE.branch },
+        settings: [
+          ...(values.agent === undefined ? [] : [{ key: "_agent", value: values.agent }]),
+          ...(values.model === undefined ? [] : [{ key: "model", value: values.model }]),
+          { key: "thought_level", value: values.effort },
+          { key: "mode", value: values.mode },
+        ],
+        turns: [COLD_TURN, warmTurn],
+        permissions: parsePermissions(values.permissions ?? "allow"),
+        cleanup: "archive",
+        turnTimeoutMs: Number(values.timeout) * 60_000,
+      }
+      return monitor(plan, Number(values.interval) * 1000, Number(values.hours) * 3_600_000)
+    }
     default:
       console.log(USAGE)
       return command === undefined || values.help === true ? 0 : 2
@@ -693,6 +717,115 @@ async function sweep(oursOnly: boolean, force: boolean): Promise<number> {
   })
   console.log(`\ndone: archived ${ok}, failed ${fail}`)
   return fail === 0 ? 0 : 1
+}
+
+const MONITOR_FILE = join(RUNS_DIRECTORY, "monitor.jsonl")
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["ARCHIVED", "ABORTED"])
+
+/**
+ * A reliability probe: one real session per interval, for the whole duration. Each probe launches an
+ * environment, waits for the marker, runs the warm turn, and archives. It then verifies the session is
+ * terminal, so nothing leaks across the run. It prints one line per probe and a rolling summary.
+ */
+async function monitor(plan: RunPlan, intervalMs: number, durationMs: number): Promise<number> {
+  const token = await spawnerToken()
+  const spawner = new SpawnerHttp(spawnerHttpUrl(env), async () => token)
+  const dir = join(RUNS_DIRECTORY, `monitor-${new Date().toISOString().slice(0, 19).replace(/[-:]/g, "").replace("T", "-")}`)
+  const started = Date.now()
+  const deadline = started + durationMs
+  const abort = new AbortController()
+  const onInterrupt = () => {
+    console.log("\nstopping the monitor after this probe")
+    abort.abort()
+  }
+  process.on("SIGINT", onInterrupt)
+  const outcomes: string[] = []
+  const coldMarkers: number[] = []
+  let probe = 0
+  console.log(`monitor      start; one probe every ${intervalMs / 1000} s for ${(durationMs / 3_600_000).toFixed(1)} h; ${plan.remote.url}`)
+  try {
+    while (Date.now() < deadline && !abort.signal.aborted) {
+      probe++
+      const tickStart = Date.now()
+      const stamp = new Date().toISOString().slice(11, 19)
+      const log = await RunLog.create(String(probe).padStart(4, "0"), dir)
+      let line: string
+      try {
+        const result = await launch({
+          ...plan,
+          acpUrl: spawnerAcpUrl(env),
+          spawner,
+          token,
+          log,
+          signal: abort.signal,
+        })
+        await appendFile(MONITOR_FILE, `${JSON.stringify({ probe, at: new Date(tickStart).toISOString(), ...result })}\n`)
+        // Verify the session is terminal, so a lagging archive never leaks.
+        const finalStatus = await ensureArchived(spawner, result.sessionId, result.cleanup?.finalStatus)
+        outcomes.push(result.outcome)
+        const cold = result.turns.find((t) => t.name === "cold")
+        const warm = result.turns.find((t) => t.name === "warm")
+        const coldMs = cold?.markerAt !== undefined && cold.promptSent !== undefined ? cold.markerAt - cold.promptSent : undefined
+        const warmMs = warm?.markerAt !== undefined && warm.promptSent !== undefined ? warm.markerAt - warm.promptSent : undefined
+        if (coldMs !== undefined) {
+          coldMarkers.push(coldMs)
+        }
+        line = `${result.outcome === "ok" ? "ok  " : "FAIL"} cold ${coldMs === undefined ? "–" : (coldMs / 1000).toFixed(1) + "s"} warm ${warmMs === undefined ? "–" : (warmMs / 1000).toFixed(1) + "s"} ${finalStatus}${result.error === undefined ? "" : ` · ${result.error.slice(0, 80)}`}`
+      }
+      catch (e) {
+        outcomes.push("failed")
+        line = `FAIL ${(e as Error).message.slice(0, 100)}`
+      }
+      finally {
+        await log.close()
+      }
+      const ok = outcomes.filter((o) => o === "ok").length
+      const p50 = coldMarkers.length ? [...coldMarkers].sort((a, b) => a - b)[Math.floor(coldMarkers.length / 2)]! : undefined
+      console.log(`#${String(probe).padStart(4)} ${stamp}  ${line}  | ok ${ok}/${outcomes.length}, cold p50 ${p50 === undefined ? "–" : (p50 / 1000).toFixed(1) + "s"}`)
+      const waitMs = tickStart + intervalMs - Date.now()
+      if (waitMs > 0 && !abort.signal.aborted && Date.now() + waitMs < deadline) {
+        await sleepUntil(waitMs, abort.signal)
+      }
+    }
+    const ok = outcomes.filter((o) => o === "ok").length
+    console.log(`monitor      done; ${probe} probes, ${ok} ok (${probe ? Math.round(1000 * ok / probe) / 10 : 0}%), log ${MONITOR_FILE}`)
+    return ok === probe ? 0 : 1
+  }
+  finally {
+    process.off("SIGINT", onInterrupt)
+  }
+}
+
+/** Confirms a session is terminal. If the archive lagged, it archives again and re-reads, up to a short budget. */
+async function ensureArchived(spawner: SpawnerHttp, sessionId: string | undefined, reported: string | undefined): Promise<string> {
+  if (sessionId === undefined) {
+    return reported ?? "no-session"
+  }
+  if (reported !== undefined && TERMINAL_STATUSES.has(reported)) {
+    return reported
+  }
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const status = (await spawner.sessionStatus(sessionId)).body.replaceAll("\"", "").trim()
+    if (TERMINAL_STATUSES.has(status)) {
+      return status
+    }
+    await spawner.archiveSession(sessionId).catch(() => {})
+    await Bun.sleep(2000)
+  }
+  return "NOT-TERMINAL"
+}
+
+/** Waits for the delay, or returns early when the signal aborts. */
+function sleepUntil(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, ms)
+    function done() {
+      clearTimeout(timer)
+      signal.removeEventListener("abort", done)
+      resolve()
+    }
+    signal.addEventListener("abort", done, { once: true })
+  })
 }
 
 function parseLaunchedFrom(body: string): string | undefined {
