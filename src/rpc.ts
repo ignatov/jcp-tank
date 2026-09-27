@@ -110,6 +110,11 @@ export class JsonRpcPeer implements WebSocketHandlers {
     this.connection?.close(1000)
   }
 
+  /** Drops the connection with no close frame. */
+  abort(): void {
+    this.connection?.abort()
+  }
+
   onText(text: string): void {
     this.handlers.onFrame?.("in", text)
     let message: Record<string, unknown>

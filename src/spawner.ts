@@ -14,6 +14,11 @@ export class SpawnerHttp {
     return this.call("DELETE", `/sessions/${encodeURIComponent(sessionId)}`)
   }
 
+  /** One page of the sessions that the user owns or shares with others. */
+  sessions(offset: number, limit: number): Promise<HttpOutcome> {
+    return this.call("GET", `/sessions?offset=${offset}&limit=${limit}`)
+  }
+
   session(sessionId: string): Promise<HttpOutcome> {
     return this.call("GET", `/sessions/${encodeURIComponent(sessionId)}`)
   }

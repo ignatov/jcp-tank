@@ -12,6 +12,7 @@ import { fetchJbaOAuthConfig } from "./jba-config"
 import { jwtClaims, stringClaim } from "./jwt"
 import { launch, type Cleanup, type LaunchResult, type Setting, type TurnSpec } from "./launch"
 import { browserLogin, openInBrowser } from "./login"
+import { runRaces } from "./races"
 import { report } from "./report"
 import { describeClose } from "./rpc"
 import { RUNS_DIRECTORY, RunLog } from "./run-log"
@@ -51,6 +52,8 @@ Commands:
   archive <session>                        End a session and keep its history
   sweep [--all] [--force]                  Archive every live session launched by this tool (cleanup after a kill)
   monitor [--interval <s>] [--hours <h>]   Reliability probe: one real session per interval, billed
+  races [--delays <ms,...>] [--parallel <n>] [--recheck <s>] [--keep]
+                                           Free draft races: a drop during session/new, and parallel drafts
 `
 
 /** A batch larger than this needs --allow-large: it is load on production, so it needs the approval of the service owners. */
@@ -93,6 +96,10 @@ async function main(): Promise<number> {
       "allow-large": { type: "boolean" },
       interval: { type: "string", default: "300" },
       hours: { type: "string", default: "12" },
+      delays: { type: "string", default: "0,100,200,250,300,1000" },
+      parallel: { type: "string", default: "4" },
+      recheck: { type: "string", default: "60" },
+      keep: { type: "boolean" },
       help: { type: "boolean", short: "h" },
     },
   })
@@ -182,6 +189,13 @@ async function main(): Promise<number> {
         turnTimeoutMs: Number(values.timeout) * 60_000,
       }
       return monitor(plan, Number(values.interval) * 1000, Number(values.hours) * 3_600_000)
+    }
+    case "races": {
+      const delaysMs = values.delays.split(",").map((delay) => Number(delay.trim()))
+      if (delaysMs.some((delay) => !Number.isInteger(delay) || delay < 0)) {
+        throw new Error(`--delays needs milliseconds separated by commas, not "${values.delays}"`)
+      }
+      return racesCommand(delaysMs, Number(values.parallel), Number(values.recheck) * 1000, values.keep === true)
     }
     default:
       console.log(USAGE)
@@ -318,6 +332,33 @@ async function spawnerToken(): Promise<string> {
     throw new AuthRequiredError("No workspace is selected. Run `jcp-tank login`.")
   }
   return (await (await minter()).spawnerToken(config.workspace.workspaceId)).token
+}
+
+/** Runs {@link runRaces}. The run deletes every draft that it made, unless `keep` is set. */
+async function racesCommand(delaysMs: readonly number[], parallelDrafts: number, recheckMs: number, keep: boolean): Promise<number> {
+  const token = await spawnerToken()
+  const log = await RunLog.create("races")
+  try {
+    await runRaces({
+      acpUrl: spawnerAcpUrl(env),
+      token,
+      http: new SpawnerHttp(spawnerHttpUrl(env), async () => token),
+      repositoryUrl: DEFAULT_REMOTE.url,
+      delaysMs,
+      parallelDrafts,
+      settleMs: 15_000,
+      recheckMs,
+      observeMs: 10_000,
+      keep,
+      log,
+      say: (line) => console.log(line),
+    })
+    return 0
+  }
+  finally {
+    await log.close()
+    console.log(`log         ${log.path}`)
+  }
 }
 
 async function probe(): Promise<number> {

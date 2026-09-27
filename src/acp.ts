@@ -148,6 +148,11 @@ export class AcpClient {
   close(): void {
     this.peer.close()
   }
+
+  /** Drops the connection with no close frame, the way a lost network does. */
+  abort(): void {
+    this.peer.abort()
+  }
 }
 
 /**

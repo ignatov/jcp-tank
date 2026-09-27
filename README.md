@@ -26,6 +26,7 @@ bun install
 | `sessions` | Lists the sessions of the workspace | free |
 | `status <id>` | Shows the state of a session and its Air Web link | free |
 | `archive <id>` | Ends a session and keeps its history | free |
+| `races` | Drops connections during `session/new` and creates parallel drafts, then deletes the drafts | free |
 
 `launch` asks the agent to repeat a unique marker. The marker in the answer proves that the environment
 works. The default mode is `read-only`, so the agent pushes no branch to the repository. Use `--mode agent`

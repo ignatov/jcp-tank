@@ -221,6 +221,14 @@ export class WebSocketConnection {
     this.sendFrame(OPCODE_TEXT, Buffer.from(text, "utf8"))
   }
 
+  /** Drops the connection with no close frame, the way a lost network does. */
+  abort(): void {
+    if (this.finished) {
+      return
+    }
+    this.socket.destroy()
+  }
+
   /** Starts the close handshake. The socket closes when the server answers, or after 3 s. */
   close(code: number = 1000, reason: string = ""): void {
     if (this.finished || this.closeSent) {
